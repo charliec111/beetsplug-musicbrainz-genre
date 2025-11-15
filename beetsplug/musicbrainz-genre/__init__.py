@@ -270,6 +270,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         genres = genres[0 : self.max_genres]
         confirm = "n"
         if self.ask_to_confirm or self.pretend:
+            logger(str((song)))
             if "genre" in song:
                 logger(f"Current genres: {song.genre}")
             logger("New genres: " + self.separator.join(genres))
