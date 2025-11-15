@@ -28,21 +28,22 @@ from string import capwords
 WHITELIST = os.path.join(os.path.dirname(__file__), "genres.txt")
 C14N_TREE = os.path.join(os.path.dirname(__file__), "genres-tree.yaml")
 
-# mb.set_useragent("beetsplug-musicbrainz-genre", "0.1a", "http://example.com/music")
+# mb.set_useragent("beetsplug-musicbrainz-genre", "0.2a", "http://example.com/music")
 requests_headers = {
-    "User-Agent": "beetsplug-musicbrainz-genre 0.1a",
+    "User-Agent": "beetsplug-musicbrainz-genre 0.2a (https://github.com/charliec111/beetsplug-musicbrainz-genre)",
 }
-# Reducing number of queries to listenbrainz, album and artist are only queried once
+# To reduce number of queries to listenbrainz, album and artist are only queried once
 responses = {}
 
 
 class MusicBrainzGenrePlugin(BeetsPlugin):
     def __init__(self):
         super().__init__()
+        self.overwrite = True
         self.log = self._log
         self.whitelist = None
         self.item_types = {}
-        self.config["prefix"].redact = True  # May contain private info
+        self.write_to_file = True
         self.config.add(
             {
                 "auto": True,
@@ -86,7 +87,15 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             dest="pretend",
             action="store_true",
             default=False,
-            help="Don't write genre tags, only search",
+            help="Don't write genre tags, only search and output the result",
+        )
+        autoartists.parser.add_option(
+            "-W",
+            "--nowrite",
+            dest="nowrite",
+            action="store_true",
+            default=False,
+            help="Don't write genre tags to file",
         )
         autoartists.parser.add_option(
             "--ask",
@@ -94,6 +103,13 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             action="store_true",
             default=False,
             help="Ask before writing each tag",
+        )
+        autoartists.parser.add_option(
+            "--no-overwrite",
+            dest="dontoverwrite",
+            action="store_true",
+            default=False,
+            help="Don't overwrite if genres are already present",
         )
         autoartists.func = self.func
         return [autoartists]
@@ -104,6 +120,8 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         self.ask_to_confirm = self.ask_to_confirm_command
         if opts.ask:
             self.ask_to_confirm = opts.ask
+        self.overwrite = not opts.dontoverwrite
+        self.write_to_file = not opts.nowrite
         if self.pretend:
             print_(f"Pretending to set genre for {len(query_result_songs)} songs")
         else:
@@ -133,6 +151,9 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             logger = print_
         else:
             logger = self.log.debug
+        if not self.overwrite and "genre" in song and len(song["genre"]) > 0:
+            logger(f"{song} already has genres {song.genre}, not overwriting")
+            return
         if (
             self.search_track
             and len(genres) < self.max_genres
@@ -159,7 +180,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                     if genre not in genres and (
                         self.whitelist is None or genre.lower() in self.whitelist
                     ):
-                        logger(f"Adding track genre {genre}")
+                        self.log.debug(f"Adding track genre {genre}")
                         genres.append(genre)
         if (
             self.search_album
@@ -186,7 +207,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                     if genre not in genres and (
                         self.whitelist is None or genre.lower() in self.whitelist
                     ):
-                        logger(f"Adding album genre {genre}")
+                        self.log.debug(f"Adding album genre {genre}")
                         genres.append(genre)
         # check mb_albumid only when mb_releasegroupid is not available
         elif (
@@ -214,7 +235,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                     if genre not in genres and (
                         self.whitelist is None or genre.lower() in self.whitelist
                     ):
-                        logger(f"Adding album genre {genre}")
+                        self.log.debug(f"Adding album genre {genre}")
                         genres.append(genre)
         if (
             self.search_artist
@@ -241,7 +262,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                     if genre not in genres and (
                         self.whitelist is None or genre.lower() in self.whitelist
                     ):
-                        logger(f"Adding artist genre {genre}")
+                        self.log.debug(f"Adding artist genre {genre}")
                         genres.append(genre)
         if len(genres) == 0:
             self.log.debug(f"{song}: No genres found")
@@ -259,6 +280,8 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         if not self.pretend and (not self.ask_to_confirm or confirm in ["y", "yes"]):
             song["genre"] = self.separator.join(genres)
             song.store()
+            if self.write_to_file:
+                song.try_write()
 
     # Input:
     # type_url is the string like "release-group/" for the applicable musicbrainz group of the mbid
@@ -276,26 +299,31 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         try:
             wait_until(self.no_mb_queries_until)
             # print(datetime.datetime.now())
-            response = requests.get(
-                self.musicbrainz_base_url + type_url + mbid,
-                timeout=5,
-                params=parameters,
-                headers=requests_headers,
-            )
+            try:
+                response = requests.get(
+                    self.musicbrainz_base_url + type_url + mbid,
+                    timeout=5,
+                    params=parameters,
+                    headers=requests_headers,
+                )
+            except:
+                return None
             # MusicBrainz api documentation asks for no more than 1 query per second, this will set
-            # a datetime object 1100 ms in the future. The wait_until function call above will wait until then.
+            # a datetime object 1100 ms in the future for the wait_until function to wait for.
             # 1100 milliseconds to be safe
             self.no_mb_queries_until = datetime.datetime.now() + datetime.timedelta(
-                milliseconds=1100
+                milliseconds=1250
             )
         except requests.exceptions.MissingSchema:
-            self.log.info(
-                f"Exiting, Invalid url missing schema (possibly missing http:// or https://): {self.musicbrainz_base_url}"
+            self.log.error(
+                f"When searching musicbrainz for genres, invalid url missing schema (possibly missing http:// or https://): {self.musicbrainz_base_url}"
             )
+            #return None
             exit(1)
         except requests.exceptions.ConnectionError:
-            self.log.info(f"Exiting, connection error: {self.musicbrainz_base_url}")
-            exit(1)
+            self.log.error(f"Connection error when searching musicbrainz for genres: {self.musicbrainz_base_url}")
+            #exit(1)
+            return None
         if response.status_code == 200:
             responses[mbid] = response
             return response
@@ -306,13 +334,11 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
 
 mbid_regex = r"^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$"
 mbid_regex_compiled = re.compile(mbid_regex)
-
-
 def is_valid_mbid(mbid):
     return mbid_regex_compiled.match(mbid.lower())
 
 
-# https://stackoverflow.com/a/54774814
+# mostly copied from https://stackoverflow.com/a/54774814
 def wait_until(end_datetime):
     while True:
         diff = (end_datetime - datetime.datetime.now()).total_seconds()
@@ -320,4 +346,5 @@ def wait_until(end_datetime):
             return  # In case end_datetime was in past to begin with
         sleep(diff / 2)
         if diff <= 0.1:
+            sleep(diff)
             return
