@@ -19,7 +19,7 @@ from beets.util import normpath
 from beets.plugins import BeetsPlugin
 from time import sleep
 
-# import musicbrainzngs as mb
+import musicbrainzngs as mb
 import requests
 import datetime
 from string import capwords
@@ -28,9 +28,10 @@ from string import capwords
 WHITELIST = os.path.join(os.path.dirname(__file__), "genres.txt")
 C14N_TREE = os.path.join(os.path.dirname(__file__), "genres-tree.yaml")
 
-# mb.set_useragent("beetsplug-musicbrainz-genre", "0.2a", "http://example.com/music")
+VERSION = "0.3a"
+mb.set_useragent("beetsplug-musicbrainz-genre", f"{VERSION}", "(https://github.com/charliec111/beetsplug-musicbrainz-genre)")
 requests_headers = {
-    "User-Agent": "beetsplug-musicbrainz-genre 0.2a (https://github.com/charliec111/beetsplug-musicbrainz-genre)",
+    "User-Agent": f"beetsplug-musicbrainz-genre {VERSION} (https://github.com/charliec111/beetsplug-musicbrainz-genre)",
 }
 # To reduce number of queries to listenbrainz, album and artist are only queried once
 responses = {}
@@ -44,8 +45,16 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         self.whitelist = None
         self.item_types = {}
         self.write_to_file = True
+        config["musicbrainz"].add(
+            {
+                "user": None,
+                "pass": None,
+            }
+        )
         self.config.add(
             {
+                "ask_to_confirm_command": True,
+                "ask_to_confirm": False,
                 "auto": True,
                 "whitelist": True,
                 "separator": ", ",
@@ -57,11 +66,14 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                 "album_min_genre_votes": 2,
                 "artist_min_genre_votes": 5,
                 "max_genres": 5,
-                "ask_to_confirm_command": True,
-                "ask_to_confirm": False,
                 "url": "https://musicbrainz.org/ws/2/",
+                "user-genres": True,
             }
         )
+        if config["musicbrainz"]["user"] and config["musicbrainz"]["pass"]:
+            mb_user=config["musicbrainz"]["user"].as_str()
+            mb_password=config["musicbrainz"]["pass"].as_str()
+            mb.auth(mb_user, mb_password)
         self.track_min_genre_votes = self.config["track_min_genre_votes"].as_number()
         self.album_min_genre_votes = self.config["album_min_genre_votes"].as_number()
         self.artist_min_genre_votes = self.config["artist_min_genre_votes"].as_number()
@@ -74,8 +86,20 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
         self.search_artist = bool(self.config["search_artist"])
         self.separator = self.config["separator"].as_str()
         self.musicbrainz_base_url = self.config["url"].as_str()
+        self.user_genres = bool(self.config["user_genres"]) if "user_genres" in self.config else True
         self.no_mb_queries_until = datetime.datetime.now()
         self.pretend = False
+        if not self.whitelist:
+            self.whitelist = set()
+            wl_filename = WHITELIST
+            # These lines copied from lastgenre plugin in beetbox beets
+            if wl_filename:
+                wl_filename = normpath(wl_filename)
+                with open(wl_filename, "rb") as f:
+                    for line in f:
+                        line = line.decode("utf-8").strip().lower()
+                        if line and not line.startswith("#"):
+                            self.whitelist.add(line)
         if self.config["auto"]:
             self.import_stages = [self.imported]
 
@@ -136,17 +160,18 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
 
     def set_genre(self, song):
         genres = []
-        if not self.whitelist:
-            self.whitelist = set()
-            wl_filename = WHITELIST
-            # These lines copied from lastgenre plugin in beetbox beets
-            if wl_filename:
-                wl_filename = normpath(wl_filename)
-                with open(wl_filename, "rb") as f:
-                    for line in f:
-                        line = line.decode("utf-8").strip().lower()
-                        if line and not line.startswith("#"):
-                            self.whitelist.add(line)
+        # Moving whitelist to init, may be slower since it's loading it every beet (incl when not needed)
+        #if not self.whitelist:
+        #    self.whitelist = set()
+        #    wl_filename = WHITELIST
+        #    # These lines copied from lastgenre plugin in beetbox beets
+        #    if wl_filename:
+        #        wl_filename = normpath(wl_filename)
+        #        with open(wl_filename, "rb") as f:
+        #            for line in f:
+        #                line = line.decode("utf-8").strip().lower()
+        #                if line and not line.startswith("#"):
+        #                    self.whitelist.add(line)
         if self.ask_to_confirm or self.pretend:
             logger = print_
         else:
@@ -164,24 +189,40 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             response = self.get_mb_request("recording/", song_recording_mbid)
             logger("---")
             if response:
-                for i in sorted(
-                    [
-                        i
-                        for i in response.json()["genres"]
-                        if int(i["count"]) >= self.track_min_genre_votes
-                    ],
-                    reverse=True,
-                    key=lambda x: x["count"],
-                ):
-                    if self.title_case:
-                        genre = capwords(i["name"])
-                    else:
-                        genre = i["name"]
-                    if genre not in genres and (
-                        self.whitelist is None or genre.lower() in self.whitelist
+                if self.user_genres and "user-tag-list" in response:
+                    for i in [
+                            i
+                            for i in response["user-tag-list"]
+                            if i["name"] in self.whitelist
+                        ]:
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding user track genre {genre}")
+                            genres.append(genre)
+                if "tag-list" in response:
+                    for i in sorted(
+                        [
+                            i
+                            for i in response["tag-list"]
+                            if int(i["count"]) >= self.track_min_genre_votes
+                        ],
+                        reverse=True,
+                        key=lambda x: x["count"],
                     ):
-                        self.log.debug(f"Adding track genre {genre}")
-                        genres.append(genre)
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding track genre {genre}")
+                            genres.append(genre)
         if (
             self.search_album
             and len(genres) < self.max_genres
@@ -191,24 +232,40 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             song_album_mbid = song["mb_releasegroupid"]
             response = self.get_mb_request("release-group/", song_album_mbid)
             if response:
-                for i in sorted(
-                    [
-                        i
-                        for i in response.json()["genres"]
-                        if int(i["count"]) >= self.album_min_genre_votes
-                    ],
-                    reverse=True,
-                    key=lambda x: x["count"],
-                ):
-                    if self.title_case:
-                        genre = capwords(i["name"])
-                    else:
-                        genre = i["name"]
-                    if genre not in genres and (
-                        self.whitelist is None or genre.lower() in self.whitelist
+                if self.user_genres and "user-tag-list" in response:
+                    for i in [
+                            i
+                            for i in response["user-tag-list"]
+                            if i["name"] in self.whitelist
+                        ]:
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding user track genre {genre}")
+                            genres.append(genre)
+                if "tag-list" in response:
+                    for i in sorted(
+                        [
+                            i
+                            for i in response["tag-list"]
+                            if int(i["count"]) >= self.album_min_genre_votes
+                        ],
+                        reverse=True,
+                        key=lambda x: x["count"],
                     ):
-                        self.log.debug(f"Adding album genre {genre}")
-                        genres.append(genre)
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding album genre {genre}")
+                            genres.append(genre)
         # check mb_albumid only when mb_releasegroupid is not available
         elif (
             self.search_album
@@ -219,24 +276,40 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             song_album_mbid = song["mb_albumid"]
             response = self.get_mb_request("release/", song_album_mbid)
             if response:
-                for i in sorted(
-                    [
-                        i
-                        for i in response.json()["genres"]
-                        if int(i["count"]) >= self.album_min_genre_votes
-                    ],
-                    reverse=True,
-                    key=lambda x: x["count"],
-                ):
-                    if self.title_case:
-                        genre = capwords(i["name"])
-                    else:
-                        genre = i["name"]
-                    if genre not in genres and (
-                        self.whitelist is None or genre.lower() in self.whitelist
+                if self.user_genres and "user-tag-list" in response:
+                    for i in [
+                            i
+                            for i in response["user-tag-list"]
+                            if i["name"] in self.whitelist
+                        ]:
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding user album genre {genre}")
+                            genres.append(genre)
+                if "tag-list" in response:
+                    for i in sorted(
+                        [
+                            i
+                            for i in response["tag-list"]
+                            if int(i["count"]) >= self.album_min_genre_votes
+                        ],
+                        reverse=True,
+                        key=lambda x: x["count"],
                     ):
-                        self.log.debug(f"Adding album genre {genre}")
-                        genres.append(genre)
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding album genre {genre}")
+                            genres.append(genre)
         if (
             self.search_artist
             and len(genres) < self.max_genres
@@ -246,24 +319,40 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
             song_artist_mbid = song["mb_artistid"]
             response = self.get_mb_request("artist/", song_artist_mbid)
             if response:
-                for i in sorted(
-                    [
-                        i
-                        for i in response.json()["genres"]
-                        if int(i["count"]) >= self.artist_min_genre_votes
-                    ],
-                    reverse=True,
-                    key=lambda x: x["count"],
-                ):
-                    if self.title_case:
-                        genre = capwords(i["name"])
-                    else:
-                        genre = i["name"]
-                    if genre not in genres and (
-                        self.whitelist is None or genre.lower() in self.whitelist
+                if self.user_genres and "user-tag-list" in response:
+                    for i in [
+                            i
+                            for i in response["user-tag-list"]
+                            if i["name"] in self.whitelist
+                        ]:
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding user artist genre {genre}")
+                            genres.append(genre)
+                if "tag-list" in response:
+                    for i in sorted(
+                        [
+                            i
+                            for i in response["tag-list"]
+                            if int(i["count"]) >= self.artist_min_genre_votes
+                        ],
+                        reverse=True,
+                        key=lambda x: x["count"],
                     ):
-                        self.log.debug(f"Adding artist genre {genre}")
-                        genres.append(genre)
+                        if self.title_case:
+                            genre = capwords(i["name"])
+                        else:
+                            genre = i["name"]
+                        if genre not in genres and (
+                            self.whitelist is None or genre.lower() in self.whitelist
+                        ):
+                            self.log.debug(f"Adding artist genre {genre}")
+                            genres.append(genre)
         if len(genres) == 0:
             self.log.debug(f"{song}: No genres found")
             return
@@ -289,48 +378,93 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
     # mbid is the mbid for the type specified
     # Output:
     # Returns the response if status code is 200, otherwise returns None
+
+    # the type_url arg is a bit wonky. there may be a way of inferring it from mbid,
+    # It's here because I was using requests.get before, which needed the full url.
+    # now using musicbrainzngs, which uses it to know which function to call.
     def get_mb_request(self, type_url, mbid):
-        # Using requests instead of musicbrainzngs or similar because I
-        # couldn't find genres, only tags from musicbrainzngs
         if mbid in responses:
             return responses[mbid]
         if not is_valid_mbid(mbid):
             return None
-        parameters = {"inc": "genres", "fmt": "json"}
+        
+        wait_until(self.no_mb_queries_until)
+        mb_func = None
         try:
-            wait_until(self.no_mb_queries_until)
-            # print(datetime.datetime.now())
-            try:
-                response = requests.get(
-                    self.musicbrainz_base_url + type_url + mbid,
-                    timeout=5,
-                    params=parameters,
-                    headers=requests_headers,
-                )
-            except:
-                return None
-            # MusicBrainz api documentation asks for no more than 1 query per second, this will set
-            # a datetime object 1100 ms in the future for the wait_until function to wait for.
-            # 1100 milliseconds to be safe
-            self.no_mb_queries_until = datetime.datetime.now() + datetime.timedelta(
-                milliseconds=1250
-            )
-        except requests.exceptions.MissingSchema:
-            self.log.error(
-                f"When searching musicbrainz for genres, invalid url missing schema (possibly missing http:// or https://): {self.musicbrainz_base_url}"
-            )
-            #return None
-            exit(1)
-        except requests.exceptions.ConnectionError:
-            self.log.error(f"Connection error when searching musicbrainz for genres: {self.musicbrainz_base_url}")
-            #exit(1)
-            return None
-        if response.status_code == 200:
-            responses[mbid] = response
-            return response
-        else:
+            match type_url:
+                case "recording/":
+                    mb_func = mb.get_recording_by_id
+                    response = mb_func(mbid, includes=["user-tags","tags"])['recording']
+                case "release-group/":
+                    mb_func = mb.get_release_group_by_id
+                    response = mb_func(mbid, includes=["user-tags","tags"])['release-group']
+                case "release/":
+                    mb_func = mb.get_release_by_id
+                    response = mb_func(mbid, includes=["user-tags","tags"])['release']
+                case "artist/":
+                    mb_func = mb.get_artist_by_id
+                    response = mb_func(mbid, includes=["user-tags","tags"])['artist']
+        except mb.ResponseError as e:
+            self.log.error(f"MusicBrainz response error when searching for genres for {mbid}")
             responses[mbid] = None
             return None
+        except KeyError: 
+            responses[mbid] = None
+            return None
+        if "user-tag-list" in response:
+            response["user-tag-list"] = [ i for i in response["user-tag-list"] if i["name"] in self.whitelist ]
+        if "tag-list" in response:
+            response["tag-list"] = [ i for i in response["tag-list"] if i["name"] in self.whitelist ]
+        #print(response)
+        if ( "user-tag-list" not in response or len(response["user-tag-list"]) == 0 ) and ( "tag-list" not in response or len(response["tag-list"]) == 0 ):
+            responses[mbid] = None
+        responses[mbid] = response
+        # MusicBrainz api documentation asks for no more than 1 query per second, this will set
+        # a datetime object 1100 ms in the future for the wait_until function to wait for.
+        # 1100 milliseconds to be safe
+        self.no_mb_queries_until = datetime.datetime.now() + datetime.timedelta(
+            milliseconds=1250
+        )
+        return response
+        # Old method:
+        # Not using this anymore because I kept getting errors trying to auth with musicbrainz
+        # Using requests instead of musicbrainzngs or similar because I
+        # couldn't find genres, only tags from musicbrainzngs
+        #parameters = {"inc": "genres", "fmt": "json"}
+        #try:
+        #    wait_until(self.no_mb_queries_until)
+        #    # print(datetime.datetime.now())
+        #    try:
+        #        response = requests.get(
+        #            self.musicbrainz_base_url + type_url + mbid,
+        #            timeout=5,
+        #            params=parameters,
+        #            headers=requests_headers,
+        #        )
+        #    except:
+        #        return None
+        #    # MusicBrainz api documentation asks for no more than 1 query per second, this will set
+        #    # a datetime object 1100 ms in the future for the wait_until function to wait for.
+        #    # 1100 milliseconds to be safe
+        #    self.no_mb_queries_until = datetime.datetime.now() + datetime.timedelta(
+        #        milliseconds=1250
+        #    )
+        #except requests.exceptions.MissingSchema:
+        #    self.log.error(
+        #        f"When searching musicbrainz for genres, invalid url missing schema (possibly missing http:// or https://): {self.musicbrainz_base_url}"
+        #    )
+        #    #return None
+        #    exit(1)
+        #except requests.exceptions.ConnectionError:
+        #    self.log.error(f"Connection error when searching musicbrainz for genres: {self.musicbrainz_base_url}")
+        #    #exit(1)
+        #    return None
+        #if response.status_code == 200:
+        #    responses[mbid] = response
+        #    return response
+        #else:
+        #    responses[mbid] = None
+        #    return None
 
 
 mbid_regex = r"^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$"
