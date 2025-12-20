@@ -1,5 +1,7 @@
 Import genre tags from musicbrainz.
-Tags will be most votes to least votes (but >= min votes) in each of track, then album, then artist.
+If there is a musicbrainz login, it will be used for user tags (tags you've 
+upvoted). This can be disabled with user_genres: False in the config.
+Tags will be user tags first, then most votes to least votes (but >= min votes) in each of track, then album, then artist.
 
 Install with:
 pip install git+https://github.com/charliec111/beetsplug-musicbrainz-genre.git
@@ -24,6 +26,10 @@ request once per album and once per artist.
 
 config example:
 
+musicbrainz:
+  genres: no
+  user: User
+  pass: 'hunter2'
 musicbrainz-genre:
   auto: True
   search_track: True

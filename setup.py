@@ -3,7 +3,7 @@ import datetime
 today=datetime.date.today().strftime("%Y.%-m.%-d")
 setup(
     name='musicbrainz-genre',
-    version='0.2.'+today+'.dev2',
+    version='0.3.'+today+'.dev2',
     packages=['beetsplug/musicbrainz-genre/' ],
     package_data={'beetsplug/musicbrainz-genre/': ['genres.txt']},
     include_package_data=True,

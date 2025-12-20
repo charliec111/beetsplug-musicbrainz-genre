@@ -70,10 +70,6 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                 "user-genres": True,
             }
         )
-        if config["musicbrainz"]["user"] and config["musicbrainz"]["pass"]:
-            mb_user=config["musicbrainz"]["user"].as_str()
-            mb_password=config["musicbrainz"]["pass"].as_str()
-            mb.auth(mb_user, mb_password)
         self.track_min_genre_votes = self.config["track_min_genre_votes"].as_number()
         self.album_min_genre_votes = self.config["album_min_genre_votes"].as_number()
         self.artist_min_genre_votes = self.config["artist_min_genre_votes"].as_number()
@@ -100,6 +96,16 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
                         line = line.decode("utf-8").strip().lower()
                         if line and not line.startswith("#"):
                             self.whitelist.add(line)
+        try:
+            if config["musicbrainz"]["user"] and config["musicbrainz"]["pass"]:
+                mb_user=config["musicbrainz"]["user"].as_str()
+                mb_password=config["musicbrainz"]["pass"].as_str()
+                mb.auth(mb_user, mb_password)
+        except Exception as e:
+            self.user_genres = False
+            self._log.warning("MusicBrainz user and pass not set correctly in config.yaml")
+            mb_user=None
+            mb_password=None
         if self.config["auto"]:
             self.import_stages = [self.imported]
 
@@ -381,7 +387,7 @@ class MusicBrainzGenrePlugin(BeetsPlugin):
 
     # the type_url arg is a bit wonky. there may be a way of inferring it from mbid,
     # It's here because I was using requests.get before, which needed the full url.
-    # now using musicbrainzngs, which uses it to know which function to call.
+    # Now it's using musicbrainzngs, so it's using it to know which function to call.
     def get_mb_request(self, type_url, mbid):
         if mbid in responses:
             return responses[mbid]
